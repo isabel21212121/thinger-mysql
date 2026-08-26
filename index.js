@@ -186,3 +186,13 @@ cron.schedule(scheduleExpr, () => {
 
 // Corre una vez de inmediato al arrancar, sin esperar al primer disparo del cron
 syncOnce().catch(err => console.error('[sync] Error inicial:', err.message));
+// Servidor HTTP simple para mantener la instancia activa en Clever Cloud
+const http = require('http');
+const PORT = process.env.PORT || 8080;
+
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Servicio de sincronizacion Thinger-MySQL activo');
+}).listen(PORT, () => {
+  console.log(`[startup] Servidor HTTP escuchando en el puerto ${PORT}`);
+});
