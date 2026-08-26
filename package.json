@@ -1,0 +1,18 @@
+{
+  "name": "thinger-mysql-sync",
+  "version": "1.0.0",
+  "description": "Sincroniza automaticamente los datos de un bucket de Thinger.io hacia una base MySQL en Clever Cloud",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "mysql2": "^3.10.0",
+    "node-cron": "^3.0.3"
+  }
+}
