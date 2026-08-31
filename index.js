@@ -88,17 +88,46 @@ async function setLastTs(conn, ts) {
 }
 
 async function fetchNewData(sinceTs) {
-  const params = { items: 1000 };
-  if (sinceTs) {
-    params.date_start = new Date(sinceTs + 1).toISOString();
-  }
-  const { data } = await axios.get(THINGER_API_URL, {
-    headers: { Authorization: `Bearer ${THINGER_TOKEN}` },
-    params
-  });
-  return Array.isArray(data) ? data : [];
-}
+  let allData = [];
+  let currentSinceTs = sinceTs;
+  let hasMore = true;
 
+  while (hasMore) {
+    const params = { items: 1000 };
+    if (currentSinceTs) {
+      params.date_start = new Date(currentSinceTs + 1).toISOString();
+    }
+
+    const { data } = await axios.get(THINGER_API_URL, {
+      headers: { Authorization: `Bearer ${THINGER_TOKEN}` },
+      params
+    });
+
+    const chunk = Array.isArray(data) ? data : [];
+    
+    if (chunk.length === 0) {
+      hasMore = false;
+    } else {
+      allData = allData.concat(chunk);
+      // Toma la marca de tiempo del último registro obtenido para pedir los siguientes
+      const lastRecord = chunk[chunk.length - 1];
+      const lastTs = lastRecord.ts || lastRecord.timestamp;
+      
+      if (lastTs && lastTs !== currentSinceTs) {
+        currentSinceTs = lastTs;
+      } else {
+        hasMore = false;
+      }
+
+      // Si Thinger devuelve menos de 1000, significa que ya llegamos al final
+      if (chunk.length < 1000) {
+        hasMore = false;
+      }
+    }
+  }
+
+  return allData;
+}
 // Thinger a veces entrega los valores anidados dentro de "val" en lugar de
 // planos junto al "ts". Esta función busca el campo en ambos lugares, y sin
 // importar mayúsculas/minúsculas.
