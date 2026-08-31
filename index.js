@@ -93,8 +93,10 @@ async function fetchNewData(sinceTs) {
   let hasMore = true;
 
   while (hasMore) {
-    const params = { items: 1000 };
-    if (currentSinceTs) {
+    // Agregamos sort: 'asc' para traer cronológicamente desde lo más viejo a lo más nuevo
+    const params = { items: 1000, sort: 'asc' };
+    
+    if (currentSinceTs > 0) {
       params.date_start = new Date(currentSinceTs + 1).toISOString();
     }
 
@@ -109,17 +111,16 @@ async function fetchNewData(sinceTs) {
       hasMore = false;
     } else {
       allData = allData.concat(chunk);
-      // Toma la marca de tiempo del último registro obtenido para pedir los siguientes
+      
       const lastRecord = chunk[chunk.length - 1];
       const lastTs = lastRecord.ts || lastRecord.timestamp;
       
-      if (lastTs && lastTs !== currentSinceTs) {
+      if (lastTs && lastTs > currentSinceTs) {
         currentSinceTs = lastTs;
       } else {
         hasMore = false;
       }
 
-      // Si Thinger devuelve menos de 1000, significa que ya llegamos al final
       if (chunk.length < 1000) {
         hasMore = false;
       }
