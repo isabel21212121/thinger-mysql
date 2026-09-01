@@ -112,100 +112,106 @@ function toMexicoDateTime(tsMillis) {
 }
 
 async function syncOnce() {
-  const conn = await getPool();
-  await ensureTables(conn);
+  const pool = await getPool();
+  const conn = await pool.getConnection(); // Obtiene una conexión individual del pool
 
-  // RESETEO FORZADO: Limpia las tablas desde el script directamente
-  console.log('[sync] Limpiando tablas para reinicio completo...');
-  await conn.query('DELETE FROM sync_state');
-  await conn.query('DELETE FROM variables_meteorologicas');
+  try {
+    await ensureTables(conn);
 
-  let lastTs = 0;
-  let keepFetching = true;
-  let totalInserted = 0;
+    // RESETEO FORZADO: Limpia las tablas desde el script directamente
+    console.log('[sync] Limpiando tablas para reinicio completo...');
+    await conn.query('DELETE FROM sync_state');
+    await conn.query('DELETE FROM variables_meteorologicas');
 
-  while (keepFetching) {
-    const params = { items: 1000, sort: 'asc' };
-    
-    if (lastTs > 0) {
-      params.min_ts = lastTs + 1;
-      params.date_start = new Date(lastTs + 1).toISOString();
-    }
+    let lastTs = 0;
+    let keepFetching = true;
+    let totalInserted = 0;
 
-    let data;
-    try {
-      const res = await axios.get(THINGER_API_URL, {
-        headers: { Authorization: `Bearer ${THINGER_TOKEN}` },
-        params
-      });
-      data = res.data;
-    } catch (err) {
-      console.error('[sync] Error consultando Thinger API:', err.message);
-      break;
-    }
-
-    const chunk = Array.isArray(data) ? data : [];
-
-    if (chunk.length === 0) {
-      console.log('[sync] Finalizó la descarga. No hay más datos.');
-      keepFetching = false;
-      break;
-    }
-
-    let batchMaxTs = lastTs;
-
-    // Inserción en bloque con Transacciones para no colapsar la base de datos
-    await conn.beginTransaction();
-    try {
-      for (const r of chunk) {
-        const rawTs = r.ts || r.timestamp;
-        if (!rawTs) continue;
-
-        const ts = typeof rawTs === 'string' ? new Date(rawTs).getTime() : Number(rawTs);
-        if (isNaN(ts)) continue;
-
-        const fechaMX = toMexicoDateTime(ts);
-
-        await conn.query(
-          `INSERT IGNORE INTO variables_meteorologicas
-           (ts, fecha, direccion, humedad, lluvia, luz, presion, temperatura, velocidad)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            ts,
-            fechaMX,
-            getField(r, 'direccion'),
-            getField(r, 'humedad'),
-            getField(r, 'lluvia'),
-            getField(r, 'luz'),
-            getField(r, 'presion'),
-            getField(r, 'temperatura'),
-            getField(r, 'velocidad')
-          ]
-        );
-
-        totalInserted++;
-        if (ts > batchMaxTs) batchMaxTs = ts;
+    while (keepFetching) {
+      const params = { items: 1000, sort: 'asc' };
+      
+      if (lastTs > 0) {
+        params.min_ts = lastTs + 1;
+        params.date_start = new Date(lastTs + 1).toISOString();
       }
-      await conn.commit();
-    } catch (dbErr) {
-      await conn.rollback();
-      console.error('[sync] Error en transacción SQL:', dbErr.message);
-      break;
-    }
 
-    if (batchMaxTs <= lastTs) {
-      console.log(`[sync] Fin de paginación. Último ts alcanzado: ${batchMaxTs}`);
-      keepFetching = false;
-      break;
-    }
+      let data;
+      try {
+        const res = await axios.get(THINGER_API_URL, {
+          headers: { Authorization: `Bearer ${THINGER_TOKEN}` },
+          params
+        });
+        data = res.data;
+      } catch (err) {
+        console.error('[sync] Error consultando Thinger API:', err.message);
+        break;
+      }
 
-    lastTs = batchMaxTs;
-    await setLastTs(conn, lastTs);
-    console.log(`[sync] Lote OK (${chunk.length} items). Total descargado: ${totalInserted}. ts actual: ${lastTs}`);
+      const chunk = Array.isArray(data) ? data : [];
 
-    if (chunk.length < 1000) {
-      keepFetching = false;
+      if (chunk.length === 0) {
+        console.log('[sync] Finalizó la descarga. No hay más datos.');
+        keepFetching = false;
+        break;
+      }
+
+      let batchMaxTs = lastTs;
+
+      // Inserción en bloque con Transacción en la conexión individual
+      await conn.beginTransaction();
+      try {
+        for (const r of chunk) {
+          const rawTs = r.ts || r.timestamp;
+          if (!rawTs) continue;
+
+          const ts = typeof rawTs === 'string' ? new Date(rawTs).getTime() : Number(rawTs);
+          if (isNaN(ts)) continue;
+
+          const fechaMX = toMexicoDateTime(ts);
+
+          await conn.query(
+            `INSERT IGNORE INTO variables_meteorologicas
+             (ts, fecha, direccion, humedad, lluvia, luz, presion, temperatura, velocidad)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              ts,
+              fechaMX,
+              getField(r, 'direccion'),
+              getField(r, 'humedad'),
+              getField(r, 'lluvia'),
+              getField(r, 'luz'),
+              getField(r, 'presion'),
+              getField(r, 'temperatura'),
+              getField(r, 'velocidad')
+            ]
+          );
+
+          totalInserted++;
+          if (ts > batchMaxTs) batchMaxTs = ts;
+        }
+        await conn.commit();
+      } catch (dbErr) {
+        await conn.rollback();
+        console.error('[sync] Error en transacción SQL:', dbErr.message);
+        break;
+      }
+
+      if (batchMaxTs <= lastTs) {
+        console.log(`[sync] Fin de paginación. Último ts alcanzado: ${batchMaxTs}`);
+        keepFetching = false;
+        break;
+      }
+
+      lastTs = batchMaxTs;
+      await setLastTs(conn, lastTs);
+      console.log(`[sync] Lote OK (${chunk.length} items). Total descargado: ${totalInserted}. ts actual: ${lastTs}`);
+
+      if (chunk.length < 1000) {
+        keepFetching = false;
+      }
     }
+  } finally {
+    conn.release(); // Libera la conexión para no agotar el pool
   }
 }
 
