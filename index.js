@@ -15,7 +15,6 @@ const {
   SYNC_INTERVAL_CRON
 } = process.env;
 
-// Valida que existan las variables de entorno mínimas
 const required = [
   'THINGER_USER', 'THINGER_TOKEN', 'THINGER_BUCKET',
   'MYSQL_HOST', 'MYSQL_DATABASE', 'MYSQL_USER', 'MYSQL_PASSWORD'
@@ -97,9 +96,8 @@ function getField(record, fieldName) {
   return null;
 }
 
-// Formatea la fecha a hora de México respetando cambios de horario históricos
 function toMexicoDateTime(tsMillis) {
-  const date = new Date(tsMillis);
+  const date = new Date(Number(tsMillis));
   const formatter = new Intl.DateTimeFormat('sv-SE', {
     timeZone: 'America/Mexico_City',
     year: 'numeric',
@@ -113,7 +111,6 @@ function toMexicoDateTime(tsMillis) {
   return formatter.format(date).replace('T', ' ');
 }
 
-// Bucle continuo para paginar de 1000 en 1000 hasta descargar todo el historial
 async function syncOnce() {
   const conn = await getPool();
   await ensureTables(conn);
@@ -126,19 +123,29 @@ async function syncOnce() {
 
   while (keepFetching) {
     const params = { items: 1000, sort: 'asc' };
+    
+    // Se envía min_ts en milisegundos y date_start en formato ISO para máxima compatibilidad con Thinger
     if (lastTs > 0) {
+      params.min_ts = lastTs + 1;
       params.date_start = new Date(lastTs + 1).toISOString();
     }
 
-    const { data } = await axios.get(THINGER_API_URL, {
-      headers: { Authorization: `Bearer ${THINGER_TOKEN}` },
-      params
-    });
+    let data;
+    try {
+      const res = await axios.get(THINGER_API_URL, {
+        headers: { Authorization: `Bearer ${THINGER_TOKEN}` },
+        params
+      });
+      data = res.data;
+    } catch (err) {
+      console.error('[sync] Error al consultar Thinger.io API:', err.message);
+      break;
+    }
 
     const chunk = Array.isArray(data) ? data : [];
 
     if (chunk.length === 0) {
-      console.log('[sync] No hay más registros históricos por recuperar.');
+      console.log('[sync] No hay más registros nuevos por recuperar.');
       keepFetching = false;
       break;
     }
@@ -146,8 +153,11 @@ async function syncOnce() {
     let batchMaxTs = lastTs;
 
     for (const r of chunk) {
-      const ts = r.ts || r.timestamp;
-      if (!ts) continue;
+      const rawTs = r.ts || r.timestamp;
+      if (!rawTs) continue;
+
+      const ts = typeof rawTs === 'string' ? new Date(rawTs).getTime() : Number(rawTs);
+      if (isNaN(ts)) continue;
 
       const fechaMX = toMexicoDateTime(ts);
 
@@ -172,14 +182,20 @@ async function syncOnce() {
       if (ts > batchMaxTs) batchMaxTs = ts;
     }
 
-    // Detener el bucle si el lote no avanzó en marcas de tiempo o si el bloque es menor a 1000
-    if (batchMaxTs === lastTs || chunk.length < 1000) {
+    // Si el timestamp no avanzó, detenemos para evitar un bucle infinito en caso de respuesta repetida
+    if (batchMaxTs <= lastTs) {
+      console.log(`[sync] El timestamp final (${batchMaxTs}) no superó el anterior (${lastTs}). Finalizando bucle.`);
       keepFetching = false;
+      break;
     }
 
     lastTs = batchMaxTs;
     await setLastTs(conn, lastTs);
-    console.log(`[sync] Lote procesado. Acumulado: ${totalInserted} registros. Último ts=${lastTs}`);
+    console.log(`[sync] Lote procesado. Nuevos registros en este bloque: ${chunk.length}. Total cargados en esta sesión: ${totalInserted}. Nuevo last_ts=${lastTs}`);
+
+    if (chunk.length < 1000) {
+      keepFetching = false;
+    }
   }
 }
 
@@ -191,10 +207,8 @@ cron.schedule(scheduleExpr, () => {
   syncOnce().catch(err => console.error('[sync] Error en cron:', err.message));
 });
 
-// Ejecución inmediata al arrancar el servidor
 syncOnce().catch(err => console.error('[sync] Error inicial:', err.message));
 
-// Servidor HTTP de soporte para Clever Cloud
 const http = require('http');
 const PORT = process.env.PORT || 8080;
 
