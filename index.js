@@ -87,51 +87,6 @@ async function setLastTs(conn, ts) {
   );
 }
 
-async function fetchNewData(sinceTs) {
-  let allData = [];
-  let currentSinceTs = sinceTs;
-  let hasMore = true;
-
-  while (hasMore) {
-    // Agregamos sort: 'asc' para traer cronológicamente desde lo más viejo a lo más nuevo
-    const params = { items: 1000, sort: 'asc' };
-    
-    if (currentSinceTs > 0) {
-      params.date_start = new Date(currentSinceTs + 1).toISOString();
-    }
-
-    const { data } = await axios.get(THINGER_API_URL, {
-      headers: { Authorization: `Bearer ${THINGER_TOKEN}` },
-      params
-    });
-
-    const chunk = Array.isArray(data) ? data : [];
-    
-    if (chunk.length === 0) {
-      hasMore = false;
-    } else {
-      allData = allData.concat(chunk);
-      
-      const lastRecord = chunk[chunk.length - 1];
-      const lastTs = lastRecord.ts || lastRecord.timestamp;
-      
-      if (lastTs && lastTs > currentSinceTs) {
-        currentSinceTs = lastTs;
-      } else {
-        hasMore = false;
-      }
-
-      if (chunk.length < 1000) {
-        hasMore = false;
-      }
-    }
-  }
-
-  return allData;
-}
-// Thinger a veces entrega los valores anidados dentro de "val" en lugar de
-// planos junto al "ts". Esta función busca el campo en ambos lugares, y sin
-// importar mayúsculas/minúsculas.
 function getField(record, fieldName) {
   const payload = record.val || record;
   if (payload[fieldName] !== undefined) return payload[fieldName];
@@ -142,81 +97,104 @@ function getField(record, fieldName) {
   return null;
 }
 
-// Convierte un timestamp (ms, UTC) a un string "YYYY-MM-DD HH:MM:SS" en hora
-// del centro de México (UTC-6, sin horario de verano desde 2022).
+// Formatea la fecha a hora de México respetando cambios de horario históricos
 function toMexicoDateTime(tsMillis) {
-  const mx = new Date(tsMillis - 6 * 60 * 60 * 1000);
-  const pad = n => String(n).padStart(2, '0');
-  return `${mx.getUTCFullYear()}-${pad(mx.getUTCMonth() + 1)}-${pad(mx.getUTCDate())} ${pad(mx.getUTCHours())}:${pad(mx.getUTCMinutes())}:${pad(mx.getUTCSeconds())}`;
+  const date = new Date(tsMillis);
+  const formatter = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'America/Mexico_City',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+  return formatter.format(date).replace('T', ' ');
 }
 
+// Bucle continuo para paginar de 1000 en 1000 hasta descargar todo el historial
 async function syncOnce() {
   const conn = await getPool();
   await ensureTables(conn);
-  const lastTs = await getLastTs(conn);
+  let lastTs = await getLastTs(conn);
 
-  console.log(`[sync] Buscando datos nuevos desde ts=${lastTs}...`);
-  const records = await fetchNewData(lastTs);
+  console.log(`[sync] Iniciando sincronización desde ts=${lastTs}...`);
 
-  if (!records.length) {
-    console.log('[sync] Sin datos nuevos.');
-    return;
+  let keepFetching = true;
+  let totalInserted = 0;
+
+  while (keepFetching) {
+    const params = { items: 1000, sort: 'asc' };
+    if (lastTs > 0) {
+      params.date_start = new Date(lastTs + 1).toISOString();
+    }
+
+    const { data } = await axios.get(THINGER_API_URL, {
+      headers: { Authorization: `Bearer ${THINGER_TOKEN}` },
+      params
+    });
+
+    const chunk = Array.isArray(data) ? data : [];
+
+    if (chunk.length === 0) {
+      console.log('[sync] No hay más registros históricos por recuperar.');
+      keepFetching = false;
+      break;
+    }
+
+    let batchMaxTs = lastTs;
+
+    for (const r of chunk) {
+      const ts = r.ts || r.timestamp;
+      if (!ts) continue;
+
+      const fechaMX = toMexicoDateTime(ts);
+
+      await conn.query(
+        `INSERT IGNORE INTO variables_meteorologicas
+         (ts, fecha, direccion, humedad, lluvia, luz, presion, temperatura, velocidad)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          ts,
+          fechaMX,
+          getField(r, 'direccion'),
+          getField(r, 'humedad'),
+          getField(r, 'lluvia'),
+          getField(r, 'luz'),
+          getField(r, 'presion'),
+          getField(r, 'temperatura'),
+          getField(r, 'velocidad')
+        ]
+      );
+
+      totalInserted++;
+      if (ts > batchMaxTs) batchMaxTs = ts;
+    }
+
+    // Detener el bucle si el lote no avanzó en marcas de tiempo o si el bloque es menor a 1000
+    if (batchMaxTs === lastTs || chunk.length < 1000) {
+      keepFetching = false;
+    }
+
+    lastTs = batchMaxTs;
+    await setLastTs(conn, lastTs);
+    console.log(`[sync] Lote procesado. Acumulado: ${totalInserted} registros. Último ts=${lastTs}`);
   }
-
-  // Muestra el primer registro crudo la primera vez, útil para verificar
-  // que los nombres de campo coinciden con los de tu bucket en Thinger.
-  if (lastTs === 0) {
-    console.log('[sync] Ejemplo de registro recibido:', JSON.stringify(records[0]));
-  }
-
-  let maxTs = lastTs;
-  let inserted = 0;
-
-  for (const r of records) {
-    const ts = r.ts;
-    if (!ts) continue;
-
-    // 1. Usamos toMexicoDateTime para formatear la fecha a hora de México (UTC-6)
-    const fechaMX = toMexicoDateTime(ts);
-
-    // 2. Usamos getField para extraer los valores sin importar si vienen dentro de 'val'
-    // o si vienen en mayúsculas/minúsculas en el bucket de Thinger
-    await conn.query(
-      `INSERT IGNORE INTO variables_meteorologicas
-       (ts, fecha, direccion, humedad, lluvia, luz, presion, temperatura, velocidad)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        ts,
-        fechaMX,
-        getField(r, 'direccion'),
-        getField(r, 'humedad'),
-        getField(r, 'lluvia'),
-        getField(r, 'luz'),
-        getField(r, 'presion'),
-        getField(r, 'temperatura'),
-        getField(r, 'velocidad')
-      ]
-    );
-
-    inserted++;
-    if (ts > maxTs) maxTs = ts;
-  }
-
-  await setLastTs(conn, maxTs);
-  console.log(`[sync] ${inserted} registro(s) procesado(s). Nuevo last_ts=${maxTs}`);
 }
 
-const scheduleExpr = SYNC_INTERVAL_CRON || '*/5 * * * *'; // cada 5 minutos por defecto
+const scheduleExpr = SYNC_INTERVAL_CRON || '*/5 * * * *';
 
 console.log(`[startup] Servicio iniciado. Sincronización programada: "${scheduleExpr}"`);
 
 cron.schedule(scheduleExpr, () => {
-  syncOnce().catch(err => console.error('[sync] Error:', err.message));
+  syncOnce().catch(err => console.error('[sync] Error en cron:', err.message));
 });
 
-// Corre una vez de inmediato al arrancar, sin esperar al primer disparo del cron
+// Ejecución inmediata al arrancar el servidor
 syncOnce().catch(err => console.error('[sync] Error inicial:', err.message));
-// Servidor HTTP simple para mantener la instancia activa en Clever Cloud
+
+// Servidor HTTP de soporte para Clever Cloud
 const http = require('http');
 const PORT = process.env.PORT || 8080;
 
