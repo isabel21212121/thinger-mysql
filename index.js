@@ -114,17 +114,19 @@ function toMexicoDateTime(tsMillis) {
 async function syncOnce() {
   const conn = await getPool();
   await ensureTables(conn);
-  let lastTs = await getLastTs(conn);
 
-  console.log(`[sync] Iniciando sincronización desde ts=${lastTs}...`);
+  // RESETEO FORZADO: Limpia las tablas desde el script directamente
+  console.log('[sync] Limpiando tablas para reinicio completo...');
+  await conn.query('DELETE FROM sync_state');
+  await conn.query('DELETE FROM variables_meteorologicas');
 
+  let lastTs = 0;
   let keepFetching = true;
   let totalInserted = 0;
 
   while (keepFetching) {
     const params = { items: 1000, sort: 'asc' };
     
-    // Se envía min_ts en milisegundos y date_start en formato ISO para máxima compatibilidad con Thinger
     if (lastTs > 0) {
       params.min_ts = lastTs + 1;
       params.date_start = new Date(lastTs + 1).toISOString();
@@ -138,68 +140,68 @@ async function syncOnce() {
       });
       data = res.data;
     } catch (err) {
-      console.error('[sync] Error al consultar Thinger.io API:', err.message);
+      console.error('[sync] Error consultando Thinger API:', err.message);
       break;
     }
 
     const chunk = Array.isArray(data) ? data : [];
 
     if (chunk.length === 0) {
-      console.log('[sync] No hay más registros nuevos por recuperar.');
+      console.log('[sync] Finalizó la descarga. No hay más datos.');
       keepFetching = false;
       break;
     }
 
     let batchMaxTs = lastTs;
 
-   // En lugar de hacer conn.query dentro del for uno por uno,
-// abre una transacción para procesar el lote completo:
-await conn.beginTransaction();
-try {
-  for (const r of chunk) {
-    const rawTs = r.ts || r.timestamp;
-    if (!rawTs) continue;
+    // Inserción en bloque con Transacciones para no colapsar la base de datos
+    await conn.beginTransaction();
+    try {
+      for (const r of chunk) {
+        const rawTs = r.ts || r.timestamp;
+        if (!rawTs) continue;
 
-    const ts = typeof rawTs === 'string' ? new Date(rawTs).getTime() : Number(rawTs);
-    if (isNaN(ts)) continue;
+        const ts = typeof rawTs === 'string' ? new Date(rawTs).getTime() : Number(rawTs);
+        if (isNaN(ts)) continue;
 
-    const fechaMX = toMexicoDateTime(ts);
+        const fechaMX = toMexicoDateTime(ts);
 
-    await conn.query(
-      `INSERT IGNORE INTO variables_meteorologicas
-       (ts, fecha, direccion, humedad, lluvia, luz, presion, temperatura, velocidad)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        ts,
-        fechaMX,
-        getField(r, 'direccion'),
-        getField(r, 'humedad'),
-        getField(r, 'lluvia'),
-        getField(r, 'luz'),
-        getField(r, 'presion'),
-        getField(r, 'temperatura'),
-        getField(r, 'velocidad')
-      ]
-    );
+        await conn.query(
+          `INSERT IGNORE INTO variables_meteorologicas
+           (ts, fecha, direccion, humedad, lluvia, luz, presion, temperatura, velocidad)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            ts,
+            fechaMX,
+            getField(r, 'direccion'),
+            getField(r, 'humedad'),
+            getField(r, 'lluvia'),
+            getField(r, 'luz'),
+            getField(r, 'presion'),
+            getField(r, 'temperatura'),
+            getField(r, 'velocidad')
+          ]
+        );
 
-    if (ts > batchMaxTs) batchMaxTs = ts;
-  }
-  await conn.commit();
-} catch (err) {
-  await conn.rollback();
-  throw err;
-}
+        totalInserted++;
+        if (ts > batchMaxTs) batchMaxTs = ts;
+      }
+      await conn.commit();
+    } catch (dbErr) {
+      await conn.rollback();
+      console.error('[sync] Error en transacción SQL:', dbErr.message);
+      break;
+    }
 
-    // Si el timestamp no avanzó, detenemos para evitar un bucle infinito en caso de respuesta repetida
     if (batchMaxTs <= lastTs) {
-      console.log(`[sync] El timestamp final (${batchMaxTs}) no superó el anterior (${lastTs}). Finalizando bucle.`);
+      console.log(`[sync] Fin de paginación. Último ts alcanzado: ${batchMaxTs}`);
       keepFetching = false;
       break;
     }
 
     lastTs = batchMaxTs;
     await setLastTs(conn, lastTs);
-    console.log(`[sync] Lote procesado. Nuevos registros en este bloque: ${chunk.length}. Total cargados en esta sesión: ${totalInserted}. Nuevo last_ts=${lastTs}`);
+    console.log(`[sync] Lote OK (${chunk.length} items). Total descargado: ${totalInserted}. ts actual: ${lastTs}`);
 
     if (chunk.length < 1000) {
       keepFetching = false;
@@ -208,21 +210,17 @@ try {
 }
 
 const scheduleExpr = SYNC_INTERVAL_CRON || '*/5 * * * *';
-
-console.log(`[startup] Servicio iniciado. Sincronización programada: "${scheduleExpr}"`);
-
 cron.schedule(scheduleExpr, () => {
-  syncOnce().catch(err => console.error('[sync] Error en cron:', err.message));
+  syncOnce().catch(err => console.error('[sync] Error cron:', err.message));
 });
 
 syncOnce().catch(err => console.error('[sync] Error inicial:', err.message));
 
 const http = require('http');
 const PORT = process.env.PORT || 8080;
-
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Servicio de sincronizacion Thinger-MySQL activo');
+  res.end('Servicio activo');
 }).listen(PORT, () => {
-  console.log(`[startup] Servidor HTTP escuchando en el puerto ${PORT}`);
+  console.log(`[startup] Servidor HTTP listo en puerto ${PORT}`);
 });
