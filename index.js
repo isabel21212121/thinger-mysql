@@ -152,35 +152,43 @@ async function syncOnce() {
 
     let batchMaxTs = lastTs;
 
-    for (const r of chunk) {
-      const rawTs = r.ts || r.timestamp;
-      if (!rawTs) continue;
+   // En lugar de hacer conn.query dentro del for uno por uno,
+// abre una transacción para procesar el lote completo:
+await conn.beginTransaction();
+try {
+  for (const r of chunk) {
+    const rawTs = r.ts || r.timestamp;
+    if (!rawTs) continue;
 
-      const ts = typeof rawTs === 'string' ? new Date(rawTs).getTime() : Number(rawTs);
-      if (isNaN(ts)) continue;
+    const ts = typeof rawTs === 'string' ? new Date(rawTs).getTime() : Number(rawTs);
+    if (isNaN(ts)) continue;
 
-      const fechaMX = toMexicoDateTime(ts);
+    const fechaMX = toMexicoDateTime(ts);
 
-      await conn.query(
-        `INSERT IGNORE INTO variables_meteorologicas
-         (ts, fecha, direccion, humedad, lluvia, luz, presion, temperatura, velocidad)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          ts,
-          fechaMX,
-          getField(r, 'direccion'),
-          getField(r, 'humedad'),
-          getField(r, 'lluvia'),
-          getField(r, 'luz'),
-          getField(r, 'presion'),
-          getField(r, 'temperatura'),
-          getField(r, 'velocidad')
-        ]
-      );
+    await conn.query(
+      `INSERT IGNORE INTO variables_meteorologicas
+       (ts, fecha, direccion, humedad, lluvia, luz, presion, temperatura, velocidad)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        ts,
+        fechaMX,
+        getField(r, 'direccion'),
+        getField(r, 'humedad'),
+        getField(r, 'lluvia'),
+        getField(r, 'luz'),
+        getField(r, 'presion'),
+        getField(r, 'temperatura'),
+        getField(r, 'velocidad')
+      ]
+    );
 
-      totalInserted++;
-      if (ts > batchMaxTs) batchMaxTs = ts;
-    }
+    if (ts > batchMaxTs) batchMaxTs = ts;
+  }
+  await conn.commit();
+} catch (err) {
+  await conn.rollback();
+  throw err;
+}
 
     // Si el timestamp no avanzó, detenemos para evitar un bucle infinito en caso de respuesta repetida
     if (batchMaxTs <= lastTs) {
