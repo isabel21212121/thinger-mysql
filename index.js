@@ -111,19 +111,19 @@ function toMexicoDateTime(tsMillis) {
   return formatter.format(date).replace('T', ' ');
 }
 
+// Función auxiliar para pausar la ejecución unos milisegundos
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 async function syncOnce() {
   const pool = await getPool();
-  const conn = await pool.getConnection(); // Obtiene una conexión individual del pool
+  const conn = await pool.getConnection();
 
   try {
     await ensureTables(conn);
 
-    // RESETEO FORZADO: Limpia las tablas desde el script directamente
-    console.log('[sync] Limpiando tablas para reinicio completo...');
-    await conn.query('DELETE FROM sync_state');
-    await conn.query('DELETE FROM variables_meteorologicas');
+    let lastTs = await getLastTs(conn);
+    console.log(`[sync] Reanudando sincronización desde ts=${lastTs}...`);
 
-    let lastTs = 0;
     let keepFetching = true;
     let totalInserted = 0;
 
@@ -156,44 +156,50 @@ async function syncOnce() {
       }
 
       let batchMaxTs = lastTs;
+      const valuesToInsert = [];
 
-      // Inserción en bloque con Transacción en la conexión individual
-      await conn.beginTransaction();
-      try {
-        for (const r of chunk) {
-          const rawTs = r.ts || r.timestamp;
-          if (!rawTs) continue;
+      // Prepara los datos en memoria
+      for (const r of chunk) {
+        const rawTs = r.ts || r.timestamp;
+        if (!rawTs) continue;
 
-          const ts = typeof rawTs === 'string' ? new Date(rawTs).getTime() : Number(rawTs);
-          if (isNaN(ts)) continue;
+        const ts = typeof rawTs === 'string' ? new Date(rawTs).getTime() : Number(rawTs);
+        if (isNaN(ts)) continue;
 
-          const fechaMX = toMexicoDateTime(ts);
+        const fechaMX = toMexicoDateTime(ts);
 
+        valuesToInsert.push([
+          ts,
+          fechaMX,
+          getField(r, 'direccion'),
+          getField(r, 'humedad'),
+          getField(r, 'lluvia'),
+          getField(r, 'luz'),
+          getField(r, 'presion'),
+          getField(r, 'temperatura'),
+          getField(r, 'velocidad')
+        ]);
+
+        if (ts > batchMaxTs) batchMaxTs = ts;
+      }
+
+      // Inserción en MASA (1 sola consulta SQL para todo el lote)
+      if (valuesToInsert.length > 0) {
+        await conn.beginTransaction();
+        try {
           await conn.query(
             `INSERT IGNORE INTO variables_meteorologicas
              (ts, fecha, direccion, humedad, lluvia, luz, presion, temperatura, velocidad)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              ts,
-              fechaMX,
-              getField(r, 'direccion'),
-              getField(r, 'humedad'),
-              getField(r, 'lluvia'),
-              getField(r, 'luz'),
-              getField(r, 'presion'),
-              getField(r, 'temperatura'),
-              getField(r, 'velocidad')
-            ]
+             VALUES ?`,
+            [valuesToInsert]
           );
-
-          totalInserted++;
-          if (ts > batchMaxTs) batchMaxTs = ts;
+          await conn.commit();
+          totalInserted += valuesToInsert.length;
+        } catch (dbErr) {
+          await conn.rollback();
+          console.error('[sync] Error en transacción SQL:', dbErr.message);
+          break;
         }
-        await conn.commit();
-      } catch (dbErr) {
-        await conn.rollback();
-        console.error('[sync] Error en transacción SQL:', dbErr.message);
-        break;
       }
 
       if (batchMaxTs <= lastTs) {
@@ -204,14 +210,17 @@ async function syncOnce() {
 
       lastTs = batchMaxTs;
       await setLastTs(conn, lastTs);
-      console.log(`[sync] Lote OK (${chunk.length} items). Total descargado: ${totalInserted}. ts actual: ${lastTs}`);
+      console.log(`[sync] Lote OK (${chunk.length} items). Total en esta sesión: ${totalInserted}. ts actual: ${lastTs}`);
 
       if (chunk.length < 1000) {
         keepFetching = false;
+      } else {
+        // Pausa de 300 ms entre peticiones para NO saturar el servidor MySQL ni la API de Thinger
+        await sleep(300);
       }
     }
   } finally {
-    conn.release(); // Libera la conexión para no agotar el pool
+    conn.release();
   }
 }
 
