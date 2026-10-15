@@ -3,7 +3,7 @@ name: Sincronizar Clima Thinger a MySQL
 on:
   schedule:
     # Se ejecuta automáticamente cada hora (puedes cambiarlo si prefieres)
-    - cron: '0 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch: # Te permite ejecutarlo manualmente desde la pestaña Actions cuando quieras
 
 jobs:
