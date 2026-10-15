@@ -224,18 +224,15 @@ async function syncOnce() {
   }
 }
 
-const scheduleExpr = SYNC_INTERVAL_CRON || '*/5 * * * *';
-cron.schedule(scheduleExpr, () => {
-  syncOnce().catch(err => console.error('[sync] Error cron:', err.message));
-});
-
-syncOnce().catch(err => console.error('[sync] Error inicial:', err.message));
-
-const http = require('http');
-const PORT = process.env.PORT || 8080;
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Servicio activo');
-}).listen(PORT, () => {
-  console.log(`[startup] Servidor HTTP listo en puerto ${PORT}`);
-});
+// Ejecutar una sola sincronización para GitHub Actions y cerrar el proceso limpiamente
+syncOnce()
+  .then(async () => {
+    console.log('[sync] Sincronización finalizada con éxito.');
+    if (pool) await pool.end();
+    process.exit(0);
+  })
+  .catch(async (err) => {
+    console.error('[sync] Error durante la sincronización:', err.message);
+    if (pool) await pool.end();
+    process.exit(1);
+  });
