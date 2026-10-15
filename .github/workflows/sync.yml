@@ -1,0 +1,35 @@
+name: Sincronizar Clima Thinger a MySQL
+
+on:
+  schedule:
+    # Se ejecuta automáticamente cada hora (puedes cambiarlo si prefieres)
+    - cron: '0 * * * *'
+  workflow_dispatch: # Te permite ejecutarlo manualmente desde la pestaña Actions cuando quieras
+
+jobs:
+  run-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar Repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/actions-setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Instalar Dependencias
+        run: npm install
+
+      - name: Ejecutar Sincronización
+        env:
+          THINGER_USER: ${{ secrets.THINGER_USER }}
+          THINGER_TOKEN: ${{ secrets.THINGER_TOKEN }}
+          THINGER_BUCKET: ${{ secrets.THINGER_BUCKET }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          SYNC_INTERVAL_CRON: ${{ secrets.SYNC_INTERVAL_CRON }}
+        run: node index.js
