@@ -2,10 +2,11 @@ name: Sincronizar Clima Thinger a MySQL
 
 on:
   schedule:
-    # Se ejecuta automáticamente cada hora (puedes cambiarlo si prefieres)
     - cron: '*/5 * * * *'
-  workflow_dispatch: # Te permite ejecutarlo manualmente desde la pestaña Actions cuando quieras
-
+  workflow_dispatch:
+  repository_dispatch:
+    types: [run-sync-trigger]
+    
 jobs:
   run-sync:
     runs-on: ubuntu-latest
